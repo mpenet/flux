@@ -1,6 +1,6 @@
 {:paths ["src" "resources"]
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        com.netflix.concurrency-limits/concurrency-limits-core {:mvn/version "0.4.0"}}
+        com.netflix.concurrency-limits/concurrency-limits-core {:mvn/version "0.5.4"}}
  :aliases
  {:build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
                  slipset/deps-deploy {:mvn/version "0.2.2"}}
