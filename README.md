@@ -361,6 +361,6 @@ When a task times out or hits an external limit, throw `UncheckedTimeoutExceptio
 
 ## License
 
-Copyright © 2026 Mpenet
+Copyright © 2026 Max Penet
 
 Distributed under the Eclipse Public License version 1.0.
