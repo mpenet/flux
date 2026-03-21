@@ -278,6 +278,85 @@
 
 ;;; Ring middleware - sync
 
+(defn- make-partitioned-limiter
+  [total-limit partitions]
+  (flux/partitioned-limiter
+   (flux/simple-limiter (flux/fixed-limit {:limit total-limit}))
+   identity
+   partitions))
+
+(deftest partitioned-limiter-test
+  (testing "admits request within partition budget"
+    (let [lim (make-partitioned-limiter 10 {:live 0.8 :batch 0.2})
+          l (flux/acquire! lim :live)]
+      (is (some? l))
+      (flux/success! l)))
+
+  (testing "rejects when partition budget is exhausted"
+    ;; live budget = floor(10 * 0.8) = 8
+    (let [lim (make-partitioned-limiter 10 {:live 0.8 :batch 0.2})
+          held (doall (repeatedly 8 #(flux/acquire! lim :live)))]
+      (is (every? some? held))
+      (is (nil? (flux/acquire! lim :live)))
+      (doseq [l held] (flux/success! l))))
+
+  (testing "partitions are independent — one exhausted does not block another"
+    (let [lim (make-partitioned-limiter 10 {:live 0.5 :batch 0.5})
+          live-slots (doall (repeatedly 5 #(flux/acquire! lim :live)))]
+      (is (every? some? live-slots))
+      ;; batch still has its own budget
+      (let [batch-slot (flux/acquire! lim :batch)]
+        (is (some? batch-slot))
+        (flux/success! batch-slot))
+      (doseq [l live-slots] (flux/success! l))))
+
+  (testing "slot is released after success!"
+    (let [lim (make-partitioned-limiter 10 {:live 0.5})
+          l1 (flux/acquire! lim :live)]
+      (flux/success! l1)
+      (let [l2 (flux/acquire! lim :live)]
+        (is (some? l2))
+        (flux/success! l2))))
+
+  (testing "slot is released after ignore!"
+    (let [lim (make-partitioned-limiter 10 {:live 0.5})
+          l1 (flux/acquire! lim :live)]
+      (flux/ignore! l1)
+      (let [l2 (flux/acquire! lim :live)]
+        (is (some? l2))
+        (flux/success! l2))))
+
+  (testing "slot is released after dropped!"
+    (let [lim (make-partitioned-limiter 10 {:live 0.5})
+          l1 (flux/acquire! lim :live)]
+      (flux/dropped! l1)
+      (let [l2 (flux/acquire! lim :live)]
+        (is (some? l2))
+        (flux/success! l2))))
+
+  (testing "nil partition key uses overflow capacity"
+    ;; total=10, live=0.7 (budget=7), batch=0.2 (budget=2), overflow=1
+    (let [lim (make-partitioned-limiter 10 {:live 0.7 :batch 0.2})
+          l (flux/acquire! lim nil)]
+      (is (some? l))
+      (flux/success! l)))
+
+  (testing "unknown partition key uses overflow capacity"
+    (let [lim (make-partitioned-limiter 10 {:live 0.8})
+          l (flux/acquire! lim :unknown)]
+      (is (some? l))
+      (flux/success! l)))
+
+  (testing "overflow is blocked when partitions consume all capacity"
+    ;; total=10, live=0.6 (6), batch=0.4 (4) — overflow=0
+    (let [lim (make-partitioned-limiter 10 {:live 0.6 :batch 0.4})
+          live-held (doall (repeatedly 6 #(flux/acquire! lim :live)))
+          batch-held (doall (repeatedly 4 #(flux/acquire! lim :batch)))]
+      (is (every? some? live-held))
+      (is (every? some? batch-held))
+      (is (nil? (flux/acquire! lim nil)))
+      (doseq [l (concat live-held batch-held)] (flux/success! l)))))
+
 (deftest ring-middleware-basic-test
   (testing "passes request through and returns response"
     (let [app (flux.ring/wrap-concurrency-limit

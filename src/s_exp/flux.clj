@@ -9,8 +9,9 @@
   (:import
    (com.netflix.concurrency.limits Limiter Limiter$Listener)
    (com.netflix.concurrency.limits.limit AIMDLimit FixedLimit Gradient2Limit Gradient2Limit$Builder VegasLimit)
-   (com.netflix.concurrency.limits.limiter BlockingLimiter LifoBlockingLimiter LifoBlockingLimiter$Builder SimpleLimiter SimpleLimiter$Builder)
-   (java.time Duration)))
+   (com.netflix.concurrency.limits.limiter AbstractLimiter BlockingLimiter LifoBlockingLimiter LifoBlockingLimiter$Builder SimpleLimiter SimpleLimiter$Builder)
+   (java.time Duration)
+   (java.util.concurrent.atomic AtomicInteger)))
 
 (set! *warn-on-reflection* true)
 ;;; Limit algorithms
@@ -143,6 +144,78 @@
     (when (and backlog-timeout-ms (not backlog-timeout-fn))
       (.backlogTimeoutMillis b backlog-timeout-ms))
     (.build b)))
+
+(defn partitioned-limiter
+  "Wraps an AbstractLimiter to enforce per-partition admission control.
+
+  The total adaptive limit is divided among named partitions according to
+  fixed ratios. Each partition's slot budget is:
+
+    floor(current-total-limit × partition-ratio)
+
+  Requests that resolve to a known partition are admitted only when that
+  partition's inflight count is below its budget. Requests that resolve to
+  nil (or an unknown partition key) are admitted only when there is spare
+  capacity not consumed by any partition (i.e. unpartitioned overflow).
+
+  The underlying limiter still enforces the global total; partitioning adds
+  a per-partition admission gate on top.
+
+  Arguments:
+    limiter       - an AbstractLimiter instance (e.g. from simple-limiter)
+    partition-by  - (fn [context] -> partition-key | nil)
+                    Called with the context passed to acquire!.
+                    Return value is looked up in partitions.
+    partitions    - map of partition-key -> ratio (0.0–1.0).
+                    Ratios should sum to ≤ 1.0.
+
+  Example:
+    (partitioned-limiter
+      (simple-limiter (vegas-limit {:max-concurrency 100}))
+      (fn [ctx] (get-in ctx [:headers \"x-tier\"]))
+      {\"live\"  0.8
+       \"batch\" 0.1})"
+  [^AbstractLimiter limiter partition-by partitions]
+  (let [counters (into {} (map (fn [[k _]] [k (AtomicInteger. 0)]) partitions))]
+    (reify Limiter
+      (acquire [_ context]
+        (let [partition-key (partition-by context)
+              total-limit   (.getLimit limiter)
+              counter       (get counters partition-key)]
+          (if counter
+            ;; known partition — admit if under budget
+            (let [budget (int (Math/floor (* total-limit ^double (get partitions partition-key))))]
+              (if (< (.get ^AtomicInteger counter) budget)
+                (do
+                  (.incrementAndGet ^AtomicInteger counter)
+                  (let [inner (.acquire limiter context)]
+                    (if (.isPresent inner)
+                      (let [^Limiter$Listener inner-listener (.get inner)]
+                        (java.util.Optional/of
+                         (reify Limiter$Listener
+                           (onSuccess [_]
+                             (.decrementAndGet ^AtomicInteger counter)
+                             (.onSuccess inner-listener))
+                           (onIgnore [_]
+                             (.decrementAndGet ^AtomicInteger counter)
+                             (.onIgnore inner-listener))
+                           (onDropped [_]
+                             (.decrementAndGet ^AtomicInteger counter)
+                             (.onDropped inner-listener)))))
+                      (do
+                        (.decrementAndGet ^AtomicInteger counter)
+                        (java.util.Optional/empty)))))
+                (java.util.Optional/empty)))
+            ;; unknown/nil partition — admit only on overflow capacity
+            (let [partitioned-busy (reduce (fn [^long acc [_ ^AtomicInteger c]] (+ acc (.get c)))
+                                           0 counters)
+                  partitioned-budget (int (Math/floor
+                                           (* total-limit
+                                              ^double (reduce + (vals partitions)))))
+                  overflow-budget (- total-limit partitioned-budget)]
+              (if (< (- (.getInflight limiter) partitioned-busy) overflow-budget)
+                (.acquire limiter context)
+                (java.util.Optional/empty)))))))))
 
 ;;; Token / listener protocol
 

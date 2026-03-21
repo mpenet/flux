@@ -213,6 +213,52 @@ The backlog timeout can also be derived dynamically from the acquire context, wh
 | `:backlog-timeout-ms` | long | 1000 | Fixed timeout in ms for queued threads |
 | `:backlog-timeout-fn` | `(fn [ctx] -> long ms)` | `nil` | Dynamic timeout derived from context; overrides `:backlog-timeout-ms` |
 
+#### `partitioned-limiter`
+
+Wraps any `AbstractLimiter` and divides its capacity among named partitions according to fixed ratios. Each partition gets a guaranteed slice of the adaptive limit:
+
+```
+partition-budget = floor(current-total-limit × ratio)
+```
+
+Requests that resolve to a known partition are admitted only when that partition's in-flight count is below its budget. Requests that resolve to an unknown or `nil` key use the leftover **overflow** capacity — the portion not allocated to any named partition. The underlying limiter still enforces the global ceiling; partitioning is a pure admission gate on top.
+
+```clojure
+(def limiter
+  (flux/partitioned-limiter
+    (flux/simple-limiter (flux/vegas-limit {:max-concurrency 100}))
+    (fn [ctx] (get-in ctx [:headers "x-tier"]))
+    {"live"  0.8
+     "batch" 0.1}))
+     ; remaining 0.1 is overflow capacity for unrecognised tier values
+```
+
+`acquire!` and `attempt!` work exactly as usual — pass the context that `partition-by` expects:
+
+```clojure
+(flux/acquire! limiter {"x-tier" "live"})
+
+(flux/attempt! limiter do-work :context {"x-tier" "batch"})
+```
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `limiter` | `AbstractLimiter` | The underlying limiter (e.g. from `simple-limiter`) |
+| `partition-by` | `(fn [context] -> key \| nil)` | Extracts a partition key from the acquire context |
+| `partitions` | `{key double}` | Map of partition key → ratio (0.0–1.0); ratios should sum to ≤ 1.0 |
+
+With the Ring middleware, supply a `:context-fn` that returns whatever `partition-by` expects:
+
+```clojure
+(flux.ring/wrap-concurrency-limit handler
+  (flux/partitioned-limiter
+    (flux/simple-limiter (flux/vegas-limit {}))
+    :tier   ; keyword lookup on the context map
+    {:live  0.8
+     :batch 0.1})
+  {:context-fn (fn [req] {:tier (keyword (get-in req [:headers "x-tier"]))})})
+```
+
 ## Ring middleware
 
 `s-exp.flux.ring/wrap-concurrency-limit` integrates with any Ring-compatible stack (Jetty, http-kit, Pedestal, etc.) and supports both the synchronous `[request]` and asynchronous `[request respond raise]` Ring arities.
