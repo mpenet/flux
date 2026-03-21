@@ -6,10 +6,7 @@ Rather than setting a fixed request-per-second cap, flux dynamically adjusts the
 
 ## Installation
 
-```clojure
-;; deps.edn
-{com.s-exp/flux {:mvn/version "0.1.0"}}
-```
+[![Clojars Project](https://img.shields.io/clojars/v/com.s-exp/flux.svg)](https://clojars.org/com.s-exp/flux)
 
 ## Concepts
 
