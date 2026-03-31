@@ -4,6 +4,8 @@ Clojure wrapper for [Netflix concurrency-limits](https://github.com/Netflix/conc
 
 Rather than setting a fixed request-per-second cap, flux dynamically adjusts the number of allowed in-flight operations based on observed latency and error signals. The limit rises when things are going well and backs off when the system shows signs of saturation.
 
+If you want to understand the motivation for this, watch this video: https://www.youtube.com/watch?v=m64SWl9bfvk, it does a better work than I would trying to explain the why/how.
+
 ## Installation
 
 [![Clojars Project](https://img.shields.io/clojars/v/com.s-exp/flux.svg)](https://clojars.org/com.s-exp/flux)
